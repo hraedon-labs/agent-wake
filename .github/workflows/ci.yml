@@ -115,7 +115,7 @@ jobs:
 
   # Pre-publication gate (Plan 004 WI-4.2 / blueprint §3): fail if forbidden
   # work-domain / personal identifiers appear in tracked files. The denylist is
-  # never committed — it comes from the AGENT_WAKE_FORBIDDEN_IDENTIFIERS
+  # never committed — it comes from the FORBIDDEN_IDENTIFIERS
   # repository secret (borrowed from the gpo-lens gate pattern). The script exits
   # 0 when the secret is unset, so the gate is a no-op until it is configured.
   identifier-gate:
@@ -128,7 +128,7 @@ jobs:
           python-version: "3.12"
       - name: Check for committed work-domain identifiers
         env:
-          AGENT_WAKE_FORBIDDEN_IDENTIFIERS: ${{ secrets.AGENT_WAKE_FORBIDDEN_IDENTIFIERS }}
+          FORBIDDEN_IDENTIFIERS: ${{ secrets.FORBIDDEN_IDENTIFIERS }}
         run: python3 scripts/check_committed_identifiers.py
 
   # The lock is only a lock if something checks it. regista and agent-wake both
