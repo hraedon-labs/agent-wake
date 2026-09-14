@@ -1,7 +1,7 @@
 """Tests for the committed-identifier gate (scripts/check_committed_identifiers.py).
 
 Ported from gpo-lens's test_check_identifiers.py and adapted for agent-wake:
-- env var is ``AGENT_WAKE_FORBIDDEN_IDENTIFIERS`` (not ``GPO_LENS_*``)
+- env var is ``FORBIDDEN_IDENTIFIERS`` (not ``GPO_LENS_*``)
 - the parser strips ``#`` comments and supports one-token-per-line denylist files
   (the agent-wake enhancement over the gpo-lens original)
 
@@ -208,7 +208,7 @@ def test_scan_files_multiple_violations_sorted(
 def test_main_exits_zero_when_env_var_empty(
     monkeypatch: pytest.MonkeyPatch, checker: ModuleType
 ) -> None:
-    monkeypatch.setenv("AGENT_WAKE_FORBIDDEN_IDENTIFIERS", "")
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "")
 
     def fake_run(*args: object, **kwargs: object) -> CompletedProcess[str]:
         return CompletedProcess(args=[], returncode=0, stdout="")
@@ -222,7 +222,7 @@ def test_main_exits_one_on_violation(
 ) -> None:
     file_path = tmp_path / "leaked.txt"
     file_path.write_text("Secret FAKEDOM value\n", encoding="utf-8")
-    monkeypatch.setenv("AGENT_WAKE_FORBIDDEN_IDENTIFIERS", "FAKEDOM")
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "FAKEDOM")
 
     def fake_run(*args: object, **kwargs: object) -> CompletedProcess[str]:
         return CompletedProcess(args=[], returncode=0, stdout=f"{file_path}\0")
@@ -236,7 +236,7 @@ def test_main_exits_zero_when_no_violation(
 ) -> None:
     file_path = tmp_path / "clean.txt"
     file_path.write_text("Nothing sensitive here.\n", encoding="utf-8")
-    monkeypatch.setenv("AGENT_WAKE_FORBIDDEN_IDENTIFIERS", "FAKEDOM")
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "FAKEDOM")
 
     def fake_run(*args: object, **kwargs: object) -> CompletedProcess[str]:
         return CompletedProcess(args=[], returncode=0, stdout=f"{file_path}\0")
@@ -251,7 +251,7 @@ def test_main_exits_zero_when_identifiers_below_min_length(
     """Identifiers shorter than MIN_IDENTIFIER_LENGTH are dropped, gate skips."""
     file_path = tmp_path / "clean.txt"
     file_path.write_text("abc xyz\n", encoding="utf-8")
-    monkeypatch.setenv("AGENT_WAKE_FORBIDDEN_IDENTIFIERS", "abc xyz")
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "abc xyz")
 
     def fake_run(*args: object, **kwargs: object) -> CompletedProcess[str]:
         return CompletedProcess(args=[], returncode=0, stdout=f"{file_path}\0")
@@ -269,7 +269,7 @@ def test_staged_mode_scans_staged_diff(
     """--staged routes through `git diff --cached` and still flags violations."""
     file_path = tmp_path / "staged.txt"
     file_path.write_text("Secret FAKEDOM value\n", encoding="utf-8")
-    monkeypatch.setenv("AGENT_WAKE_FORBIDDEN_IDENTIFIERS", "FAKEDOM")
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "FAKEDOM")
 
     seen: dict[str, list[str]] = {}
 
@@ -287,7 +287,7 @@ def test_staged_mode_clean_when_no_violation(
 ) -> None:
     file_path = tmp_path / "staged.txt"
     file_path.write_text("Clean content\n", encoding="utf-8")
-    monkeypatch.setenv("AGENT_WAKE_FORBIDDEN_IDENTIFIERS", "FAKEDOM")
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "FAKEDOM")
 
     def fake_run(args: list[str], **kwargs: object) -> CompletedProcess[str]:
         return CompletedProcess(args=args, returncode=0, stdout=f"{file_path}\0")
