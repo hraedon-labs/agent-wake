@@ -268,6 +268,9 @@ def test_main_exits_zero_when_no_violation(
 def test_main_exits_zero_when_identifiers_below_min_length(
     monkeypatch: pytest.MonkeyPatch, checker: ModuleType, tmp_path: Path
 ) -> None:
+    # Every subprocess is stubbed, so no publication declaration can be modelled;
+    # this pins the non-public (skip) branch explicitly.
+    monkeypatch.setattr(checker, "_declares_public", lambda: False)
     """Identifiers shorter than MIN_IDENTIFIER_LENGTH are dropped, gate skips."""
     file_path = tmp_path / "clean.txt"
     file_path.write_text("abc xyz\n", encoding="utf-8")
