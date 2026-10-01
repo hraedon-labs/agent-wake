@@ -208,13 +208,33 @@ def test_scan_files_multiple_violations_sorted(
 def test_main_exits_zero_when_env_var_empty(
     monkeypatch: pytest.MonkeyPatch, checker: ModuleType
 ) -> None:
+    """An unset denylist is a skip -- but only on a repo that is not public."""
     monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "")
+    monkeypatch.setattr(checker, "_declares_public", lambda: False)
 
     def fake_run(*args: object, **kwargs: object) -> CompletedProcess[str]:
         return CompletedProcess(args=[], returncode=0, stdout="")
 
     monkeypatch.setattr(checker.subprocess, "run", fake_run)
     assert checker.main([]) == 0
+
+
+def test_main_exits_one_when_env_var_empty_on_a_public_repo(
+    monkeypatch: pytest.MonkeyPatch, checker: ModuleType
+) -> None:
+    """The other direction: on a public repo an unset denylist fails, not skips.
+
+    A skip there exits 0 having scanned nothing, which CI cannot tell apart from
+    a clean tree.
+    """
+    monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "")
+    monkeypatch.setattr(checker, "_declares_public", lambda: True)
+
+    def fake_run(*args: object, **kwargs: object) -> CompletedProcess[str]:
+        return CompletedProcess(args=[], returncode=0, stdout="")
+
+    monkeypatch.setattr(checker.subprocess, "run", fake_run)
+    assert checker.main([]) == 1
 
 
 def test_main_exits_one_on_violation(
@@ -248,6 +268,9 @@ def test_main_exits_zero_when_no_violation(
 def test_main_exits_zero_when_identifiers_below_min_length(
     monkeypatch: pytest.MonkeyPatch, checker: ModuleType, tmp_path: Path
 ) -> None:
+    # Every subprocess is stubbed, so no publication declaration can be modelled;
+    # this pins the non-public (skip) branch explicitly.
+    monkeypatch.setattr(checker, "_declares_public", lambda: False)
     """Identifiers shorter than MIN_IDENTIFIER_LENGTH are dropped, gate skips."""
     file_path = tmp_path / "clean.txt"
     file_path.write_text("abc xyz\n", encoding="utf-8")
@@ -266,20 +289,26 @@ def test_main_exits_zero_when_identifiers_below_min_length(
 def test_staged_mode_scans_staged_diff(
     monkeypatch: pytest.MonkeyPatch, checker: ModuleType, tmp_path: Path
 ) -> None:
-    """--staged routes through `git diff --cached` and still flags violations."""
+    """--staged selects its paths through `git diff --cached`.
+
+    Every subprocess is stubbed here, so the staged CONTENT is never materialised
+    and the gate fails closed on the unreadable snapshot. That the staged bytes
+    (not the worktree copy) are what gets scanned is pinned against real git in
+    test_identifier_gate_visibility.py.
+    """
     file_path = tmp_path / "staged.txt"
     file_path.write_text("Secret FAKEDOM value\n", encoding="utf-8")
     monkeypatch.setenv("FORBIDDEN_IDENTIFIERS", "FAKEDOM")
 
-    seen: dict[str, list[str]] = {}
+    seen: list[list[str]] = []
 
     def fake_run(args: list[str], **kwargs: object) -> CompletedProcess[str]:
-        seen["args"] = args
+        seen.append(args)
         return CompletedProcess(args=args, returncode=0, stdout=f"{file_path}\0")
 
     monkeypatch.setattr(checker.subprocess, "run", fake_run)
     assert checker.main(["--staged"]) == 1
-    assert seen["args"][:3] == ["git", "diff", "--cached"]
+    assert any(call[:3] == ["git", "diff", "--cached"] for call in seen)
 
 
 def test_staged_mode_clean_when_no_violation(
