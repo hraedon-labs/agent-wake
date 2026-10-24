@@ -160,6 +160,88 @@ def test_rate_limit_buckets_are_independent_per_source():
     assert limiter.allow("source-b")[0] is True
 
 
+def test_peer_bucket_limit_evicts_least_recently_used_peer():
+    limiter = SourceRateLimiter(1.0, 1, clock=lambda: 0.0, max_buckets=2)
+
+    assert limiter.allow("peer-a")[0] is True
+    assert limiter.allow("peer-b")[0] is True
+    # A rejected request still counts as recent use of the peer's bucket.
+    assert limiter.allow("peer-a")[0] is False
+    assert limiter.allow("peer-c")[0] is True
+    assert len(limiter._buckets) == 2
+    assert limiter.allow("peer-a")[0] is False
+    assert limiter.allow("peer-b")[0] is True
+    assert len(limiter._buckets) == 2
+
+
+@pytest.mark.parametrize("max_buckets", [0, -1])
+def test_peer_bucket_limit_must_be_positive(max_buckets):
+    with pytest.raises(ValueError, match="max_buckets"):
+        SourceRateLimiter(1.0, 1, max_buckets=max_buckets)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unsigned_first", [False, True])
+async def test_source_named_like_peer_gets_full_burst(monkeypatch, unsigned_first):
+    import agent_waked.ingest as ingest_mod
+
+    source = "192.0.2.10"
+    config = _config()
+    config["sources"][source] = config["sources"].pop("test")
+    config["wake"] = {"ingest_rate_limit": 0.001, "ingest_rate_burst": 1}
+    peer = [source]
+    monkeypatch.setattr(ingest_mod, "_client_address", lambda request: peer[0])
+    router = MockRouter()
+    async with TestClient(TestServer(create_ingest_app(config, router))) as cli:
+        body = b'{"content":"signed request"}'
+        if unsigned_first:
+            rejected = await _make_request(cli, body, source=source, sig="sha256=bad")
+            assert rejected.status == 403
+            peer[0] = "192.0.2.11"
+        response = await _make_request(
+            cli, body, source=source, sig=_hmac(b"shhh", body), event_id="same-name"
+        )
+        assert response.status == 202, await response.json()
+        assert len(router.delivered) == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_churn_never_resets_verified_source_budget(monkeypatch):
+    import agent_waked.ingest as ingest_mod
+
+    limiters = []
+
+    class ObservedRateLimiter(SourceRateLimiter):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, clock=lambda: 0.0, **kwargs)
+            limiters.append(self)
+
+    monkeypatch.setattr(ingest_mod, "SourceRateLimiter", ObservedRateLimiter)
+    monkeypatch.setattr(ingest_mod, "MAX_PEER_BUCKETS", 2)
+    peer = ["192.0.2.1"]
+    monkeypatch.setattr(ingest_mod, "_client_address", lambda request: peer[0])
+    config = _config()
+    config["wake"] = {"ingest_rate_limit": 0.001, "ingest_rate_burst": 2}
+    router = MockRouter()
+    async with TestClient(TestServer(create_ingest_app(config, router))) as cli:
+        body = b'{"content":"signed request"}'
+        first = await _make_request(cli, body, event_id="before-churn")
+        assert first.status == 202
+        for index in range(2, 8):
+            peer[0] = f"192.0.2.{index}"
+            rejected = await _make_request(cli, body, sig="sha256=bad")
+            assert rejected.status == 403
+        peer[0] = "192.0.2.8"
+        second = await _make_request(cli, body, event_id="after-churn")
+        assert second.status == 202
+        peer[0] = "192.0.2.9"
+        limited = await _make_request(cli, body, event_id="over-source-budget")
+        assert limited.status == 429
+        assert int(limited.headers["Retry-After"]) >= 1
+        assert len(router.delivered) == 2
+        assert sorted(len(limiter._buckets) for limiter in limiters) == [1, 2]
+
+
 @pytest.mark.asyncio
 async def test_unsigned_flood_cannot_starve_signed_sender(monkeypatch):
     """WI-008: an unsigned flood claiming a known source must not exhaust that

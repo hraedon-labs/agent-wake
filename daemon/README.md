@@ -245,9 +245,10 @@ rotation procedure. Ingress source secrets are not reused for callback signing.
 
 ### Ingest rate limiting
 
-HTTP ingest uses an in-process token bucket per configured source, falling back
-to client IP for unknown sources. Defaults are 10 events/second with a burst of
-20. Override them in the `wake` block:
+HTTP ingest checks separate in-process token buckets: the transport peer IP
+before signature verification, then the configured source after its signature
+verifies. Unsigned requests cannot spend a source's budget. Both checks default
+to 10 events/second with a burst of 20. Override them in the `wake` block:
 
 ```json
 {
@@ -259,6 +260,12 @@ to client IP for unknown sources. Defaults are 10 events/second with a burst of
 ```
 
 Exhausted buckets return HTTP 429 with `Retry-After`.
+
+Peer state is capped at 4,096 entries, evicting the least recently used peer.
+An evicted peer gets a fresh burst on its next request, so the peer limit is
+approximate under churn; authenticated source budgets are retained separately
+and cannot be reset by that churn. Peer addresses come from the connection,
+not `X-Forwarded-For`. Callers sharing a proxy or NAT also share a peer budget.
 
 ### Removing a source
 
