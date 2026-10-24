@@ -11,7 +11,7 @@ import json
 import logging
 import math
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +45,10 @@ DELIVERY_DRAIN_TIMEOUT = 3.0
 # write in the CancelledError arm is synchronous, so this only has to cover
 # scheduling, not I/O.
 FORCE_DRAIN_TIMEOUT = 2.0
+
+# Unauthenticated peers may be arbitrarily numerous. Keep their approximate
+# rate-limit state bounded without evicting authenticated source budgets.
+MAX_PEER_BUCKETS = 4096
 
 # The in-flight delivery task set, published on the app so ``main._shutdown``
 # can guarantee the invariant it owns — nothing may still want the store once
@@ -226,15 +230,12 @@ def _client_address(request: web.Request) -> str:
 
 
 class SourceRateLimiter:
-    """In-process token buckets keyed by remote address, then by source.
+    """In-process token buckets for one identity namespace.
 
-    A request is charged twice against the same bucket set: once by client
-    address before the HMAC verifies (so an unsigned flood cannot exhaust a
-    bucket keyed on the spoofable source header and starve the signed sender,
-    WI-008), and once by source after verification (the per-source cap on
-    authenticated traffic). Anonymous floods stay in their own per-peer
-    buckets and never touch a source bucket, which is what keeps the estate's
-    own signed sender from being 429'd by traffic it did not send.
+    ``max_buckets`` bounds peer state by evicting the least recently used
+    entry. Evicted peers start with a fresh burst, so this is an approximate
+    limit under peer churn. Authenticated source buckets are separate and
+    unbounded here: their keys come only from the configured source set.
     """
 
     def __init__(
@@ -243,14 +244,22 @@ class SourceRateLimiter:
         burst: int,
         *,
         clock: Callable[[], float] = time.monotonic,
+        max_buckets: int | None = None,
     ) -> None:
+        if max_buckets is not None and max_buckets < 1:
+            raise ValueError("max_buckets must be positive")
         self._rate = rate
         self._burst = float(burst)
         self._clock = clock
-        self._buckets: dict[str, tuple[float, float]] = {}
+        self._max_buckets = max_buckets
+        self._buckets: OrderedDict[str, tuple[float, float]] = OrderedDict()
 
     def allow(self, identifier: str) -> tuple[bool, float]:
         now = self._clock()
+        if identifier in self._buckets:
+            self._buckets.move_to_end(identifier)
+        elif self._max_buckets is not None and len(self._buckets) >= self._max_buckets:
+            self._buckets.popitem(last=False)
         tokens, updated_at = self._buckets.get(identifier, (self._burst, now))
         tokens = min(self._burst, tokens + max(0.0, now - updated_at) * self._rate)
         if tokens >= 1.0:
@@ -271,10 +280,12 @@ def create_ingest_app(
 ) -> web.Application:
     dedupe = Dedupe(store=store)
     wake_cfg = config.get("wake") or {}
-    rate_limiter = SourceRateLimiter(
-        rate=float(wake_cfg.get("ingest_rate_limit", 10.0)),
-        burst=int(wake_cfg.get("ingest_rate_burst", 20)),
+    rate = float(wake_cfg.get("ingest_rate_limit", 10.0))
+    burst = int(wake_cfg.get("ingest_rate_burst", 20))
+    peer_rate_limiter = SourceRateLimiter(
+        rate=rate, burst=burst, max_buckets=MAX_PEER_BUCKETS,
     )
+    source_rate_limiter = SourceRateLimiter(rate=rate, burst=burst)
     # RUF006: an ``ensure_future`` task nobody holds a reference to can be
     # garbage-collected mid-flight, silently dropping the delivery. Same
     # treatment as ``Router._background_tasks``. The set is also what lets
@@ -356,7 +367,7 @@ def create_ingest_app(
         # the estate's own signed sender (WI-008). Per-peer bounding keeps each
         # flooding origin in its own bucket; the trusted sender identity keys
         # its own bucket only after the HMAC verifies below.
-        peer_allowed, peer_retry = rate_limiter.allow(_client_address(request))
+        peer_allowed, peer_retry = peer_rate_limiter.allow(_client_address(request))
         if not peer_allowed:
             return _rate_limited(peer_retry)
 
@@ -389,7 +400,7 @@ def create_ingest_app(
         # spoofable header and is the right key for the per-source bucket. An
         # unsigned flood can only ever reach the peer bucket above, so this one
         # stays clean for the real sender.
-        source_allowed, source_retry = rate_limiter.allow(source)
+        source_allowed, source_retry = source_rate_limiter.allow(source)
         if not source_allowed:
             return _rate_limited(source_retry)
 
